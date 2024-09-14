@@ -185,6 +185,130 @@ pub fn get_tera(dir: Option<&Path>) -> Tera {
             _ => Err("join_path input must be an array of strings".into()),
         },
     );
+    tera.register_function(
+        "absolute_path",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("path") {
+                Some(Value::String(path)) => {
+                    let result = std::path::absolute(path)?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("absolute_path path must be a string".into()),
+            }
+        },
+    );
+    tera.register_function(
+        "canonicalize",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("path") {
+                Some(Value::String(path)) => {
+                    let result = std::fs::canonicalize(path)?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("canonicalize path must be a string".into()),
+            }
+        },
+    );
+    tera.register_function(
+        "extension",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("path") {
+                Some(Value::String(path)) => {
+                    let result = Path::new(path).extension()?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("extension path must be a string".into()),
+            }
+        },
+    );
+    tera.register_function(
+        "file_name",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("path") {
+                Some(Value::String(path)) => {
+                    let result = Path::new(path).file_name()?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("file_name path must be a string".into()),
+            }
+        },
+    );
+    tera.register_function(
+        "file_stem",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("path") {
+                Some(Value::String(path)) => {
+                    let result = Path::new(path).file_stem()?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("file_stem path must be a string".into()),
+            }
+        },
+    );
+    tera.register_function(
+        "parent_directory",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("path") {
+                Some(Value::String(path)) => {
+                    let result = Path::new(path).parent()?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("parent_directory path must be a string".into()),
+            }
+        },
+    );
+    tera.register_function(
+        "without_extension",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("path") {
+                Some(Value::String(path)) => {
+                    let result = Path::new(path).with_extension()?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("without_extension path must be a string".into()),
+            }
+        },
+    );
+    tera.register_function(
+        "clean",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("path") {
+                Some(Value::String(path)) => {
+                    let result = Path::new(path).lexiclean()?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("clean path must be a string".into()),
+            }
+        },
+    );
+    tera.register_function(
+        "join",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            match args.get("paths") {
+                Some(Value::Vector(paths)) => {
+                    paths
+                        .iter()
+                        .map(Value::as_str)
+                        .collect::<Option<PathBuf>>()
+                        .ok_or("join_path input must be an array of strings".into())
+                        .map(|p| Value::String(p.to_string_lossy().to_string())),
+                    let result = Path::new(path).with_extension()?;
+
+                    Ok(Value::String(result))
+                }
+                _ => Err("join paths must be a list of strings".into()),
+            }
+        },
+    );
+
     tera.register_filter(
         "quote",
         move |input: &Value, _args: &HashMap<String, Value>| match input {
