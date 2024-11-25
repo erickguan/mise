@@ -115,6 +115,63 @@ impl EnvDiff {
         Ok(Self::new(&env, additions))
     }
 
+    pub fn from_program<T, U, V>(script: &Path, env: T) -> Result<Self>
+    where
+        T: IntoIterator<Item = (U, V)>,
+        U: Into<OsString>,
+        V: Into<OsString>,
+    {
+        let env: HashMap<OsString, OsString> =
+            env.into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+        let bash_path = file::which("bash").unwrap_or("/bin/bash".into());
+        let out = cmd!(
+            bash_path,
+            "-c",
+            indoc::formatdoc! {"
+                . {script}
+                export -p
+            ", script = script.display()}
+        )
+        .full_env(&env)
+        .read()?;
+        let env: HashMap<String, String> = env
+            .into_iter()
+            .map(|(k, v)| (k.into_string().unwrap(), v.into_string().unwrap()))
+            .collect();
+
+        let mut additions = HashMap::new();
+        let mut cur_key = None;
+        for line in out.lines() {
+            match line.strip_prefix("declare -x ") {
+                Some(line) => {
+                    let (k, v) = line.split_once('=').unwrap_or_default();
+                    if valid_key(k) {
+                        continue;
+                    }
+                    cur_key = Some(k.to_string());
+                    additions.insert(k.to_string(), v.to_string());
+                }
+                None => {
+                    if let Some(k) = &cur_key {
+                        let v = format!("\n{}", line);
+                        additions.get_mut(k).unwrap().push_str(&v);
+                    }
+                }
+            }
+        }
+        for (k, v) in additions.clone().iter() {
+            let v = normalize_escape_sequences(v);
+            if let Some(orig) = env.get(k) {
+                if &v == orig {
+                    additions.remove(k);
+                    continue;
+                }
+            }
+            additions.insert(k.into(), v);
+        }
+        Ok(Self::new(&env, additions))
+    }
+
     pub fn deserialize(raw: &str) -> Result<EnvDiff> {
         let mut writer = Vec::new();
         let mut decoder = ZlibDecoder::new(writer);

@@ -84,6 +84,8 @@ pub enum EnvDirective {
     Path(PathEntry),
     /// run a bash script and apply the resulting env diff
     Source(PathBuf),
+    /// run an arbitrary program and apply the resulting env diff
+    Run(PathBuf),
     PythonVenv {
         path: PathBuf,
         create: bool,
@@ -111,6 +113,7 @@ impl Display for EnvDirective {
             EnvDirective::File(path) => write!(f, "dotenv {}", display_path(path)),
             EnvDirective::Path(path) => write!(f, "path_add {}", display_path(path)),
             EnvDirective::Source(path) => write!(f, "source {}", display_path(path)),
+            EnvDirective::Run(path) => write!(f, "run {}", display_path(path)),
             EnvDirective::Module(name, _) => write!(f, "module {}", name),
             EnvDirective::PythonVenv { path, create } => {
                 write!(f, "python venv path={}", display_path(path))?;
@@ -123,13 +126,35 @@ impl Display for EnvDirective {
     }
 }
 
+
+/// `EnvResults` collects user configured environment changes.
+#[derive(Default)]
 pub struct EnvResults {
+    /// environment variables. Key represents the environment variable key.
+    /// value is a tuple representing (the environment variable value, the environment variable config path)
     pub env: IndexMap<String, (String, PathBuf)>,
+    /// environment variables to purge.
     pub env_remove: BTreeSet<String>,
+    /// paths to environment variable files.
     pub env_files: Vec<PathBuf>,
+    /// paths that mise should prepend to `PATH`.
     pub env_paths: Vec<PathBuf>,
-    pub env_scripts: Vec<PathBuf>,
+    /// paths to scripts or programs that mise called for environment variables.  
+    pub env_scripts: Vec<EnvScript>,
 }
+
+/// `EnvScript` enables mise to import environment variables from external programs.
+/// mise runs an external program and extract diff from the resulting environment variables.
+#[derive(Debug)]
+enum EnvScript {
+    /// path to a bash script
+    /// supports `._source`
+    Script(PathBuf),
+    /// path to an arbitrary program
+    /// supports `._run`
+    Program(PathBuf),
+}
+
 
 impl EnvResults {
     pub fn resolve(
@@ -142,13 +167,7 @@ impl EnvResults {
             .iter()
             .map(|(k, v)| (k.clone(), (v.clone(), None)))
             .collect::<IndexMap<_, _>>();
-        let mut r = Self {
-            env: Default::default(),
-            env_remove: BTreeSet::new(),
-            env_files: Vec::new(),
-            env_paths: Vec::new(),
-            env_scripts: Vec::new(),
-        };
+        let mut results = EnvResults::default();
         let normalize_path = |config_root: &PathBuf, p: PathBuf| {
             let p = p.strip_prefix("./").unwrap_or(&p);
             match p.strip_prefix("~/") {
@@ -179,14 +198,14 @@ impl EnvResults {
             // trace!("resolve: ctx.get('env'): {:#?}", &ctx.get("env"));
             match directive {
                 EnvDirective::Val(k, v) => {
-                    let v = r.parse_template(&ctx, &source, &v)?;
-                    r.env_remove.remove(&k);
+                    let v = results.parse_template(&ctx, &source, &v)?;
+                    results.env_remove.remove(&k);
                     // trace!("resolve: inserting {:?}={:?} from {:?}", &k, &v, &source);
                     env.insert(k, (v, Some(source.clone())));
                 }
                 EnvDirective::Rm(k) => {
                     env.shift_remove(&k);
-                    r.env_remove.insert(k);
+                    results.env_remove.insert(k);
                 }
                 EnvDirective::Path(input_str) => {
                     // trace!("resolve: input_str: {:#?}", input_str);
@@ -198,7 +217,7 @@ impl EnvResults {
                             //     input.to_string_lossy().as_ref()
                             // );
                             let s =
-                                r.parse_template(&ctx, &source, input.to_string_lossy().as_ref())?;
+                                results.parse_template(&ctx, &source, input.to_string_lossy().as_ref())?;
                             // trace!("resolve: s: {:?}", &s);
                             paths.push((PathEntry::Normal(s.into()), source));
                         }
@@ -214,14 +233,14 @@ impl EnvResults {
                 }
                 EnvDirective::File(input) => {
                     trust_check(&source)?;
-                    let s = r.parse_template(&ctx, &source, input.to_string_lossy().as_ref())?;
+                    let s = results.parse_template(&ctx, &source, input.to_string_lossy().as_ref())?;
                     for p in xx::file::glob(normalize_path(&config_root, s.into()))? {
-                        r.env_files.push(p.clone());
+                        results.env_files.push(p.clone());
                         let errfn = || eyre!("failed to parse dotenv file: {}", display_path(&p));
                         if let Ok(dotenv) = dotenvy::from_path_iter(&p) {
                             for item in dotenv {
                                 let (k, v) = item.wrap_err_with(errfn)?;
-                                r.env_remove.remove(&k);
+                                results.env_remove.remove(&k);
                                 env.insert(k, (v, Some(p.clone())));
                             }
                         }
@@ -230,19 +249,40 @@ impl EnvResults {
                 EnvDirective::Source(input) => {
                     SETTINGS.ensure_experimental("env._.source")?;
                     trust_check(&source)?;
-                    let s = r.parse_template(&ctx, &source, input.to_string_lossy().as_ref())?;
+                    let s = results.parse_template(&ctx, &source, input.to_string_lossy().as_ref())?;
                     for p in xx::file::glob(normalize_path(&config_root, s.into()))? {
-                        r.env_scripts.push(p.clone());
+                        results.env_scripts.push(EnvScript::Script(p.clone()));
                         let env_diff = EnvDiff::from_bash_script(&p, env_vars.clone())?;
                         for p in env_diff.to_patches() {
                             match p {
                                 EnvDiffOperation::Add(k, v) | EnvDiffOperation::Change(k, v) => {
-                                    r.env_remove.remove(&k);
+                                    results.env_remove.remove(&k);
                                     env.insert(k.clone(), (v.clone(), Some(source.clone())));
                                 }
                                 EnvDiffOperation::Remove(k) => {
                                     env.shift_remove(&k);
-                                    r.env_remove.insert(k);
+                                    results.env_remove.insert(k);
+                                }
+                            }
+                        }
+                    }
+                }
+                EnvDirective::Run(input) => {
+                    SETTINGS.ensure_experimental("env._.run")?;
+                    trust_check(&source)?;
+                    let s = results.parse_template(&ctx, &source, input.to_string_lossy().as_ref())?;
+                    for p in xx::file::glob(normalize_path(&config_root, s.into()))? {
+                        results.env_scripts.push(EnvScript::Program(p.clone()));
+                        let env_diff = EnvDiff::from_program(&p, env_vars.clone())?;
+                        for p in env_diff.to_patches() {
+                            match p {
+                                EnvDiffOperation::Add(k, v) | EnvDiffOperation::Change(k, v) => {
+                                    results.env_remove.remove(&k);
+                                    env.insert(k.clone(), (v.clone(), Some(source.clone())));
+                                }
+                                EnvDiffOperation::Remove(k) => {
+                                    env.shift_remove(&k);
+                                    results.env_remove.insert(k);
                                 }
                             }
                         }
@@ -251,7 +291,7 @@ impl EnvResults {
                 EnvDirective::PythonVenv { path, create } => {
                     trace!("python venv: {} create={create}", display_path(&path));
                     trust_check(&source)?;
-                    let venv = r.parse_template(&ctx, &source, path.to_string_lossy().as_ref())?;
+                    let venv = results.parse_template(&ctx, &source, path.to_string_lossy().as_ref())?;
                     let venv = normalize_path(&config_root, venv.into());
                     if !venv.exists() && create {
                         // TODO: the toolset stuff doesn't feel like it's in the right place here
@@ -293,7 +333,7 @@ impl EnvResults {
                         }
                     }
                     if venv.exists() {
-                        r.env_paths.insert(0, venv.join("bin"));
+                        results.env_paths.insert(0, venv.join("bin"));
                         env.insert(
                             "VIRTUAL_ENV".into(),
                             (venv.to_string_lossy().to_string(), Some(source.clone())),
@@ -312,12 +352,12 @@ impl EnvResults {
                     let plugin = VfoxPlugin::new(name, path);
                     if let Some(env) = plugin.mise_env(&value)? {
                         for (k, v) in env {
-                            r.env.insert(k, (v, source.clone()));
+                            results.env.insert(k, (v, source.clone()));
                         }
                     }
                     if let Some(path) = plugin.mise_path(&value)? {
                         for p in path {
-                            r.env_paths.push(p.into());
+                            results.env_paths.push(p.into());
                         }
                     }
                 }
@@ -330,7 +370,7 @@ impl EnvResults {
         ctx.insert("env", &env_vars);
         for (k, (v, source)) in env {
             if let Some(source) = source {
-                r.env.insert(k, (v, source));
+                results.env.insert(k, (v, source));
             }
         }
         // trace!("resolve: paths: {:#?}", &paths);
@@ -346,14 +386,14 @@ impl EnvResults {
                 PathEntry::Normal(pb) => pb.to_string_lossy().to_string(),
                 PathEntry::Lazy(pb) => {
                     // trace!("resolve: s: {:?}", &s);
-                    r.parse_template(&ctx, &source, pb.to_string_lossy().as_ref())?
+                    results.parse_template(&ctx, &source, pb.to_string_lossy().as_ref())?
                 }
             };
             env::split_paths(&s)
                 .map(|s| normalize_path(&config_root, s))
-                .for_each(|p| r.env_paths.push(p.clone()));
+                .for_each(|p| results.env_paths.push(p.clone()));
         }
-        Ok(r)
+        Ok(results)
     }
 
     fn parse_template(
