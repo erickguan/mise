@@ -44,6 +44,12 @@ pub struct MiseToml {
     env: EnvList,
     #[serde(default, deserialize_with = "deserialize_arr")]
     env_path: Vec<PathEntry>,
+    #[serde(default, deserialize_with = "deserialize_arr")]
+    post_env_file: Vec<PathBuf>,
+    #[serde(default)]
+    post_env: EnvList,
+    #[serde(default, deserialize_with = "deserialize_arr")]
+    post_env_path: Vec<PathEntry>,
     #[serde(default)]
     alias: AliasMap,
     #[serde(skip)]
@@ -281,6 +287,26 @@ impl ConfigFile for MiseToml {
         Ok(all)
     }
 
+    fn post_env_entries(&self) -> eyre::Result<Vec<EnvDirective>> {
+        let env_entries = self.post_env.0.iter().cloned();
+        let path_entries = self
+            .post_env_path
+            .iter()
+            .map(|p| EnvDirective::Path(p.clone()))
+            .collect_vec();
+        let env_files = self
+            .post_env_file
+            .iter()
+            .map(|p| EnvDirective::File(p.clone()))
+            .collect_vec();
+        let all = path_entries
+            .into_iter()
+            .chain(env_files)
+            .chain(env_entries)
+            .collect::<Vec<_>>();
+        Ok(all)
+    }
+
     fn tasks(&self) -> Vec<&Task> {
         self.tasks.0.values().collect()
     }
@@ -500,6 +526,14 @@ impl Debug for MiseToml {
                 d.field("env", &env);
             }
         }
+        if !self.post_env_file.is_empty() {
+            d.field("post_env_file", &self.post_env_file);
+        }
+        if let Ok(env) = self.post_env_entries() {
+            if !env.is_empty() {
+                d.field("post_env", &env);
+            }
+        }
         if !self.alias.is_empty() {
             d.field("alias", &self.alias);
         }
@@ -523,6 +557,9 @@ impl Clone for MiseToml {
             env_file: self.env_file.clone(),
             env: self.env.clone(),
             env_path: self.env_path.clone(),
+            post_env_file: self.post_env_file.clone(),
+            post_env: self.post_env.clone(),
+            post_env_path: self.post_env_path.clone(),
             alias: self.alias.clone(),
             doc: self.doc.clone(),
             hooks: self.hooks.clone(),
@@ -1300,6 +1337,143 @@ mod tests {
 
     #[test]
     fn test_path_dirs() {
+        let env = parse_env(formatdoc! {r#"
+            env_path=["/foo", "./bar"]
+            [env]
+            foo="bar"
+            "#});
+
+        assert_snapshot!(env, @r"
+        path_add /foo
+        path_add ./bar
+        foo=bar
+        ");
+
+        let env = parse_env(formatdoc! {r#"
+            env_path="./bar"
+            "#});
+        assert_snapshot!(env, @"path_add ./bar");
+
+        let env = parse_env(formatdoc! {r#"
+            [env]
+            _.path = "./bar"
+            "#});
+        assert_debug_snapshot!(env, @r#""path_add ./bar""#);
+
+        let env = parse_env(formatdoc! {r#"
+            [env]
+            _.path = ["/foo", "./bar"]
+            "#});
+        assert_snapshot!(env, @r"
+        path_add /foo
+        path_add ./bar
+        ");
+
+        let env = parse_env(formatdoc! {r#"
+            [[env]]
+            _.path = "/foo"
+            [[env]]
+            _.path = "./bar"
+            "#});
+        assert_snapshot!(env, @r"
+        path_add /foo
+        path_add ./bar
+        ");
+
+        let env = parse_env(formatdoc! {r#"
+            env_path = "/foo"
+            [env]
+            _.path = "./bar"
+            "#});
+        assert_snapshot!(env, @r"
+        path_add /foo
+        path_add ./bar
+        ");
+    }
+
+    #[test]
+    fn test_env_file() {
+        let env = parse_env(formatdoc! {r#"
+            env_file = ".env"
+            "#});
+
+        assert_debug_snapshot!(env, @r#""dotenv .env""#);
+
+        let env = parse_env(formatdoc! {r#"
+            env_file=[".env", ".env2"]
+            "#});
+        assert_debug_snapshot!(env, @r#""dotenv .env\ndotenv .env2""#);
+
+        let env = parse_env(formatdoc! {r#"
+            [env]
+            _.file = ".env"
+            "#});
+        assert_debug_snapshot!(env, @r#""dotenv .env""#);
+
+        let env = parse_env(formatdoc! {r#"
+            [env]
+            _.file = [".env", ".env2"]
+            "#});
+        assert_debug_snapshot!(env, @r#""dotenv .env\ndotenv .env2""#);
+
+        let env = parse_env(formatdoc! {r#"
+            dotenv = ".env"
+            [env]
+            _.file = ".env2"
+            "#});
+        assert_debug_snapshot!(env, @r#""dotenv .env\ndotenv .env2""#);
+    }
+
+    #[test]
+    fn test_post_env() {
+        let p = CWD.as_ref().unwrap().join(".test.mise.toml");
+        file::write(
+            &p,
+            formatdoc! {r#"
+        min_version = "2024.1.1"
+        [tools]
+        python = "3.12"
+
+        [env.post]
+        foo="exec('python -c \"print(1)\"')"
+        "#},
+        )
+        .unwrap();
+        let cf = MiseToml::from_file(&p).unwrap();
+        let dump = cf.dump().unwrap();
+        let env = parse_env(file::read_to_string(&p).unwrap());
+
+        assert_debug_snapshot!(env, @r#""foo=1""#);
+        let cf: Box<dyn ConfigFile> = Box::new(cf);
+        with_settings!({
+            assert_snapshot!(dump);
+            assert_snapshot!(cf);
+            assert_debug_snapshot!(cf);
+        });
+    }
+
+    #[test]
+    fn test_post_env_array_valid() {
+        let env = parse_env(formatdoc! {r#"
+        min_version = "2024.1.1"
+        [tools]
+        python = "3.12"
+
+        [[env.post]]
+        foo="exec('python -c \"print(1)\"')"
+
+        [[env.post]]
+        foo2="exec('python -c \"print(2)\"')"
+        "#});
+
+        assert_snapshot!(env, @r"
+        foo=1
+        foo2=2
+        ");
+    }
+
+    #[test]
+    fn test_post_path_dirs() {
         let env = parse_env(formatdoc! {r#"
             env_path=["/foo", "./bar"]
             [env]

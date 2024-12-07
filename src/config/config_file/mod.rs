@@ -70,6 +70,9 @@ pub trait ConfigFile: Debug + Send + Sync {
     fn env_entries(&self) -> eyre::Result<Vec<EnvDirective>> {
         Ok(Default::default())
     }
+    fn post_env_entries(&self) -> eyre::Result<Vec<EnvDirective>> {
+        Ok(Default::default())
+    }
     fn tasks(&self) -> Vec<&Task> {
         Default::default()
     }
