@@ -123,11 +123,18 @@ impl Display for EnvDirective {
     }
 }
 
+/// `EnvResults` collects user configured environment changes.
 pub struct EnvResults {
+    /// environment variables. Key represents the environment variable key.
+    /// value is a tuple representing (the environment variable value, the environment variable config path)
     pub env: IndexMap<String, (String, PathBuf)>,
+    /// environment variables to purge.
     pub env_remove: BTreeSet<String>,
+    /// paths to environment variable files.
     pub env_files: Vec<PathBuf>,
+    /// paths that mise should prepend to `PATH`.
     pub env_paths: Vec<PathBuf>,
+    /// paths to scripts or programs that mise called for environment variables.  
     pub env_scripts: Vec<PathBuf>,
 }
 
